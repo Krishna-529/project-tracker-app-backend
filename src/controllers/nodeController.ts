@@ -206,19 +206,64 @@ export const reorderNodes = catchAsync(async (req: Request, res) => {
   const body = req.body as ReorderNodesInput;
   const parentId = body.parentId ?? null;
 
-  await db.transaction(async (tx) => {
-    for (let index = 0; index < body.orderedIds.length; index += 1) {
-      const nodeId = body.orderedIds[index];
-
-      await tx.execute(sql`
-        UPDATE nodes
-        SET sort_order = ${index}, updated_at = NOW()
-        WHERE id = ${nodeId} AND parent_id IS NOT DISTINCT FROM ${parentId}
-      `);
-    }
+  console.log('[Backend] reorderNodes called:', {
+    parentId,
+    orderedIds: body.orderedIds,
+    timestamp: new Date().toISOString(),
   });
 
-  return res.status(200).json({ status: 'ok' });
+  try {
+    await db.transaction(async (tx) => {
+      if (body.orderedIds.length === 0) {
+        return;
+      }
+
+      const siblings = await tx.execute<{ id: number }>(sql`
+        SELECT id
+        FROM nodes
+        WHERE parent_id IS NOT DISTINCT FROM ${parentId}
+        ORDER BY sort_order ASC
+        FOR UPDATE
+      `);
+
+      if (siblings.length !== body.orderedIds.length) {
+        throw new AppError('Reorder payload does not cover all siblings', 400);
+      }
+
+      const tempOffset = siblings.length + 10;
+
+      for (let index = 0; index < body.orderedIds.length; index += 1) {
+        const nodeId = body.orderedIds[index];
+        const result = await tx.execute<{ id: number }>(sql`
+          UPDATE nodes
+          SET sort_order = ${index + tempOffset}, updated_at = NOW()
+          WHERE id = ${nodeId}
+            AND parent_id IS NOT DISTINCT FROM ${parentId}
+          RETURNING id
+        `);
+
+        if (result.length === 0) {
+          throw new AppError(`Node ${nodeId} not found under parent`, 404);
+        }
+      }
+
+      for (let index = 0; index < body.orderedIds.length; index += 1) {
+        const nodeId = body.orderedIds[index];
+        await tx.execute(sql`
+          UPDATE nodes
+          SET sort_order = ${index}, updated_at = NOW()
+          WHERE id = ${nodeId}
+            AND parent_id IS NOT DISTINCT FROM ${parentId}
+        `);
+      }
+    });
+
+    console.log('[Backend] reorderNodes success');
+    return res.status(200).json({ status: 'ok' });
+  } catch (error) {
+    console.error('[Backend] reorderNodes error:', error);
+    throw error;
+  }
 });
 
 export const moveNode = catchAsync(async (req: Request, res) => {
