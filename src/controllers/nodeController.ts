@@ -150,6 +150,9 @@ export const updateNode = catchAsync(async (req: Request, res) => {
 
   if (Object.prototype.hasOwnProperty.call(body, 'status')) {
     updatePayload.status = body.status;
+    if (body.status === 'archived') {
+      updatePayload.updatedAt = new Date();
+    }
   }
 
   if (Object.prototype.hasOwnProperty.call(body, 'metaDescription')) {
@@ -350,4 +353,43 @@ export const moveNode = catchAsync(async (req: Request, res) => {
   });
 
   return res.status(200).json({ status: 'ok' });
+});
+
+export const deleteNode = catchAsync(async (req: Request, res) => {
+  const nodeId = Number(req.params.id);
+
+  if (Number.isNaN(nodeId)) {
+    throw new AppError('Invalid node ID', 400);
+  }
+
+  await db.transaction(async (tx) => {
+    const [nodeToDelete] = await tx.select().from(nodes).where(eq(nodes.id, nodeId));
+    if (!nodeToDelete) {
+      throw new AppError('Node not found', 404);
+    }
+
+    const nodePath = nodeToDelete.path;
+
+    // Delete the node and all its descendants using path matching
+    await tx.execute(
+      sql`DELETE FROM nodes WHERE path <@ ${nodePath}::ltree`
+    );
+
+    // Re-sequence sort order for siblings to close gaps
+    const parentId = nodeToDelete.parentId ?? null;
+    const siblings = await tx.execute<{ id: number }>(
+      sql`SELECT id FROM nodes WHERE parent_id IS NOT DISTINCT FROM ${parentId} ORDER BY sort_order ASC`
+    );
+
+    for (let index = 0; index < siblings.length; index += 1) {
+      const siblingId = siblings[index]?.id;
+      if (!siblingId) continue;
+      await tx
+        .update(nodes)
+        .set({ sortOrder: index, updatedAt: new Date() })
+        .where(eq(nodes.id, siblingId));
+    }
+  });
+
+  return res.status(200).json({ status: 'ok', message: 'Node deleted successfully' });
 });
