@@ -47,6 +47,7 @@ export const getNodeTree = catchAsync(async (req: Request, res) => {
       status: nodes.status,
       path: nodes.path,
       sortOrder: nodes.sortOrder,
+      deadline: nodes.deadline,
     })
     .from(nodes)
     .orderBy(asc(nodes.parentId), asc(nodes.sortOrder), asc(nodes.id));
@@ -131,6 +132,7 @@ export const createNode = catchAsync(async (req: Request, res) => {
       status: nodes.status,
       path: nodes.path,
       sortOrder: nodes.sortOrder,
+      deadline: nodes.deadline,
       createdAt: nodes.createdAt,
       updatedAt: nodes.updatedAt,
     });
@@ -195,6 +197,7 @@ export const updateNode = catchAsync(async (req: Request, res) => {
       status: nodes.status,
       path: nodes.path,
       sortOrder: nodes.sortOrder,
+      deadline: nodes.deadline,
       updatedAt: nodes.updatedAt,
     });
 
