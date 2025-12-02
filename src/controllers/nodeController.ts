@@ -1,12 +1,14 @@
 import type { Request } from 'express';
-import { eq, asc } from 'drizzle-orm';
+import { eq, asc, and } from 'drizzle-orm';
 import { sql } from 'drizzle-orm';
 import { createHash } from 'crypto';
+
 
 import { db } from '../db';
 import { nodes } from '../db/schema';
 import { AppError } from '../errors/AppError';
 import { catchAsync } from '../utils/catchAsync';
+import { syncTaskToDailyQuest } from '../services/dailyQuestService';
 import type {
   CreateNodeInput,
   MoveNodeInput,
@@ -20,10 +22,11 @@ const computeEtag = (lastUpdated: Date | null, total: number) => {
 };
 
 export const getNodeTree = catchAsync(async (req: Request, res) => {
+  const userId = req.user!.id;
   const metaResult = await db.execute<{
     last_updated: Date | null;
     total: number;
-  }>(sql`SELECT max(updated_at) AS last_updated, count(*)::int AS total FROM nodes`);
+  }>(sql`SELECT max(updated_at) AS last_updated, count(*)::int AS total FROM nodes WHERE user_id = ${userId}`);
 
   const metaRow = metaResult[0] ?? { last_updated: null, total: 0 };
   const lastUpdatedValue = metaRow.last_updated
@@ -50,7 +53,9 @@ export const getNodeTree = catchAsync(async (req: Request, res) => {
       deadline: nodes.deadline,
     })
     .from(nodes)
+    .where(eq(nodes.userId, userId))
     .orderBy(asc(nodes.parentId), asc(nodes.sortOrder), asc(nodes.id));
+
 
   res.setHeader('ETag', etag);
   return res.json({
@@ -64,9 +69,10 @@ export const getNodeTree = catchAsync(async (req: Request, res) => {
 
 export const getNodeById = catchAsync(async (req: Request, res) => {
   const id = Number(req.params.id);
+  const userId = req.user!.id;
 
   const node = await db.query.nodes.findFirst({
-    where: eq(nodes.id, id),
+    where: and(eq(nodes.id, id), eq(nodes.userId, userId)),
   });
 
   if (!node) {
@@ -74,16 +80,20 @@ export const getNodeById = catchAsync(async (req: Request, res) => {
   }
 
   return res.json({ data: node });
+
 });
 
 export const createNode = catchAsync(async (req: Request, res) => {
   const body = req.body as CreateNodeInput;
+  const userId = req.user!.id;
 
   const insertPayload: Partial<typeof nodes.$inferInsert> = {
     name: body.name,
     isTask: body.isTask,
     parentId: body.parentId ?? null,
+    userId,
   };
+
 
   if (body.status !== undefined) {
     insertPayload.status = body.status;
@@ -143,8 +153,10 @@ export const createNode = catchAsync(async (req: Request, res) => {
 export const updateNode = catchAsync(async (req: Request, res) => {
   const body = req.body as UpdateNodeInput;
   const id = Number(req.params.id);
+  const userId = req.user!.id;
 
   const updatePayload: Partial<typeof nodes.$inferInsert> = {};
+
 
   if (Object.prototype.hasOwnProperty.call(body, 'name')) {
     updatePayload.name = body.name;
@@ -188,34 +200,52 @@ export const updateNode = catchAsync(async (req: Request, res) => {
   const [updated] = await db
     .update(nodes)
     .set(filteredPayload)
-    .where(eq(nodes.id, id))
-    .returning({
-      id: nodes.id,
-      name: nodes.name,
-      parentId: nodes.parentId,
-      isTask: nodes.isTask,
-      status: nodes.status,
-      path: nodes.path,
-      sortOrder: nodes.sortOrder,
-      deadline: nodes.deadline,
-      updatedAt: nodes.updatedAt,
-    });
+    .where(and(eq(nodes.id, id), eq(nodes.userId, userId)))
+    .returning();
+
 
   if (!updated) {
     throw new AppError('Node not found', 404);
   }
 
-  return res.json({ data: updated });
+  // Auto-sync to Daily Quest if deadline is being set and node is a task
+  if (updated.isTask && Object.prototype.hasOwnProperty.call(body, 'deadline') && body.deadline) {
+    try {
+      console.log('[Backend] Auto-syncing task to Daily Quest:', { id: updated.id, name: updated.name });
+      const userEmail = req.user!.email;
+      await syncTaskToDailyQuest({ node: updated, userEmail });
+      console.log('[Backend] Successfully synced to Daily Quest');
+    } catch (err) {
+      console.error('[Backend] Failed to sync to Daily Quest:', err);
+      // Don't fail the request if Daily Quest sync fails
+    }
+  }
+
+  return res.json({ 
+    data: {
+      id: updated.id,
+      name: updated.name,
+      parentId: updated.parentId,
+      isTask: updated.isTask,
+      status: updated.status,
+      path: updated.path,
+      sortOrder: updated.sortOrder,
+      deadline: updated.deadline,
+      updatedAt: updated.updatedAt,
+    }
+  });
 });
 
 export const reorderNodes = catchAsync(async (req: Request, res) => {
   const body = req.body as ReorderNodesInput;
   const parentId = body.parentId ?? null;
+  const userId = req.user!.id;
 
   console.log('[Backend] reorderNodes called:', {
     parentId,
     orderedIds: body.orderedIds,
     timestamp: new Date().toISOString(),
+
   });
 
   try {
@@ -228,9 +258,11 @@ export const reorderNodes = catchAsync(async (req: Request, res) => {
         SELECT id
         FROM nodes
         WHERE parent_id IS NOT DISTINCT FROM ${parentId}
+        AND user_id = ${userId}
         ORDER BY sort_order ASC
         FOR UPDATE
       `);
+
 
       if (siblings.length !== body.orderedIds.length) {
         throw new AppError('Reorder payload does not cover all siblings', 400);
@@ -245,8 +277,10 @@ export const reorderNodes = catchAsync(async (req: Request, res) => {
           SET sort_order = ${index + tempOffset}, updated_at = NOW()
           WHERE id = ${nodeId}
             AND parent_id IS NOT DISTINCT FROM ${parentId}
+            AND user_id = ${userId}
           RETURNING id
         `);
+
 
         if (result.length === 0) {
           throw new AppError(`Node ${nodeId} not found under parent`, 404);
@@ -260,7 +294,9 @@ export const reorderNodes = catchAsync(async (req: Request, res) => {
           SET sort_order = ${index}, updated_at = NOW()
           WHERE id = ${nodeId}
             AND parent_id IS NOT DISTINCT FROM ${parentId}
+            AND user_id = ${userId}
         `);
+
       }
     });
 
@@ -276,12 +312,14 @@ export const moveNode = catchAsync(async (req: Request, res) => {
   const body = req.body as MoveNodeInput;
   const nodeId = body.nodeId;
   const targetParentId = body.newParentId ?? null;
+  const userId = req.user!.id;
 
   await db.transaction(async (tx) => {
-    const [nodeToMove] = await tx.select().from(nodes).where(eq(nodes.id, nodeId));
+    const [nodeToMove] = await tx.select().from(nodes).where(and(eq(nodes.id, nodeId), eq(nodes.userId, userId)));
     if (!nodeToMove) {
       throw new AppError('Node not found', 404);
     }
+
 
     const oldPath = nodeToMove.path;
     const oldParentId = nodeToMove.parentId ?? null;
@@ -292,10 +330,11 @@ export const moveNode = catchAsync(async (req: Request, res) => {
       // Move to root
       newPath = String(nodeId);
     } else {
-      const [parentNode] = await tx.select().from(nodes).where(eq(nodes.id, targetParentId));
+      const [parentNode] = await tx.select().from(nodes).where(and(eq(nodes.id, targetParentId), eq(nodes.userId, userId)));
       if (!parentNode) {
         throw new AppError('Parent node not found', 404);
       }
+
       if (parentNode.isTask) {
         throw new AppError('Cannot move under a task', 400);
       }
@@ -308,8 +347,9 @@ export const moveNode = catchAsync(async (req: Request, res) => {
     }
 
     const sortResult = await tx.execute<{ max_sort: number }>(
-      sql`SELECT COALESCE(MAX(sort_order), -1)::int AS max_sort FROM nodes WHERE parent_id IS NOT DISTINCT FROM ${targetParentId}`
+      sql`SELECT COALESCE(MAX(sort_order), -1)::int AS max_sort FROM nodes WHERE parent_id IS NOT DISTINCT FROM ${targetParentId} AND user_id = ${userId}`
     );
+
     newSortOrder = Number(sortResult[0]?.max_sort ?? -1) + 1;
 
     await tx
@@ -320,11 +360,12 @@ export const moveNode = catchAsync(async (req: Request, res) => {
         sortOrder: newSortOrder,
         updatedAt: new Date(),
       })
-      .where(eq(nodes.id, nodeId));
+      .where(and(eq(nodes.id, nodeId), eq(nodes.userId, userId)));
 
     const descendants = await tx.execute<{ id: number; path: string }>(
-      sql`SELECT id, path::text AS path FROM nodes WHERE path <@ ${oldPath}::ltree AND id <> ${nodeId}`
+      sql`SELECT id, path::text AS path FROM nodes WHERE path <@ ${oldPath}::ltree AND id <> ${nodeId} AND user_id = ${userId}`
     );
+
 
     for (const descendant of descendants) {
       const relative = descendant.path.startsWith(`${oldPath}.`)
@@ -335,13 +376,13 @@ export const moveNode = catchAsync(async (req: Request, res) => {
       await tx
         .update(nodes)
         .set({ path: descendantPath, updatedAt: new Date() })
-        .where(eq(nodes.id, descendant.id));
+        .where(and(eq(nodes.id, descendant.id), eq(nodes.userId, userId)));
     }
 
     // Re-sequence sort order for the old parent to close any gaps
     if (oldParentId !== targetParentId) {
       const siblings = await tx.execute<{ id: number }>(
-        sql`SELECT id FROM nodes WHERE parent_id IS NOT DISTINCT FROM ${oldParentId} ORDER BY sort_order ASC`
+        sql`SELECT id FROM nodes WHERE parent_id IS NOT DISTINCT FROM ${oldParentId} AND user_id = ${userId} ORDER BY sort_order ASC`
       );
 
       for (let index = 0; index < siblings.length; index += 1) {
@@ -350,9 +391,10 @@ export const moveNode = catchAsync(async (req: Request, res) => {
         await tx
           .update(nodes)
           .set({ sortOrder: index, updatedAt: new Date() })
-          .where(eq(nodes.id, siblingId));
+          .where(and(eq(nodes.id, siblingId), eq(nodes.userId, userId)));
       }
     }
+
   });
 
   return res.status(200).json({ status: 'ok' });
@@ -360,12 +402,19 @@ export const moveNode = catchAsync(async (req: Request, res) => {
 
 export const deleteNode = catchAsync(async (req: Request, res) => {
   const nodeId = Number(req.params.id);
+  const userId = req.user!.id;
 
   if (Number.isNaN(nodeId)) {
     throw new AppError('Invalid node ID', 400);
   }
 
   await db.transaction(async (tx) => {
+    // Verify ownership
+    const [node] = await tx.select().from(nodes).where(and(eq(nodes.id, nodeId), eq(nodes.userId, userId)));
+    if (!node) {
+      throw new AppError('Node not found', 404);
+    }
+
     const [nodeToDelete] = await tx.select().from(nodes).where(eq(nodes.id, nodeId));
     if (!nodeToDelete) {
       throw new AppError('Node not found', 404);

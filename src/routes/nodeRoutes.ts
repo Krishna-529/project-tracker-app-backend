@@ -10,6 +10,7 @@ import {
   updateNode,
 } from '../controllers/nodeController';
 import { validateRequest } from '../middleware/validateRequest';
+import { requireAuth } from '../middleware/requireAuth';
 import {
   createNodeSchema,
   getNodeByIdSchema,
@@ -22,7 +23,10 @@ import { catchAsync } from '../utils/catchAsync';
 
 const router = Router();
 
+router.use(requireAuth);
+
 router.get('/tree', getNodeTree);
+
 router.post('/reorder', validateRequest(reorderNodesSchema), reorderNodes);
 router.post('/move', validateRequest(moveNodeSchema), moveNode);
 router.post('/fix-paths', catchAsync(async (req, res) => {

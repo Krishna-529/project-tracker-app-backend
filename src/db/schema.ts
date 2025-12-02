@@ -9,6 +9,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uuid,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
@@ -31,7 +32,21 @@ const ltree = customType<{ data: string; driverData: string }>({
   },
 });
 
+export const users = pgTable('users', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  googleId: text('google_id').notNull().unique(),
+  email: text('email').notNull().unique(),
+  name: text('name'),
+  avatarUrl: text('avatar_url'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+
 export const nodes = pgTable('nodes', {
+
   id: bigserial('id', { mode: 'number' }).primaryKey(),
   name: text('name').notNull(),
   isTask: pgBoolean('is_task').notNull().default(false),
@@ -46,9 +61,12 @@ export const nodes = pgTable('nodes', {
     .$type<Record<string, unknown>>()
     .default(sql`'{}'::jsonb`),
   sortOrder: integer('sort_order').default(0),
+  userId: uuid('user_id')
+    .references(() => users.id, { onDelete: 'cascade' }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
+
 
 export type Node = typeof nodes.$inferSelect;
 export type NewNode = typeof nodes.$inferInsert;
