@@ -8,7 +8,7 @@ import { db } from '../db';
 import { nodes } from '../db/schema';
 import { AppError } from '../errors/AppError';
 import { catchAsync } from '../utils/catchAsync';
-import { syncTaskToDailyQuest } from '../services/dailyQuestService';
+import { syncTaskToDailyQuest, deleteNodesFromDailyQuest, updateTaskInDailyQuestIfExists } from '../services/dailyQuestService';
 import type {
   CreateNodeInput,
   MoveNodeInput,
@@ -221,6 +221,20 @@ export const updateNode = catchAsync(async (req: Request, res) => {
     }
   }
 
+  // If name or metaDescription changed, update Daily Quest item ONLY if it already exists
+  const shouldConditionalUpdate =
+    Object.prototype.hasOwnProperty.call(body, 'name') ||
+    Object.prototype.hasOwnProperty.call(body, 'metaDescription');
+
+  if (shouldConditionalUpdate) {
+    try {
+      const userEmail = req.user!.email;
+      await updateTaskInDailyQuestIfExists({ node: updated, userEmail });
+    } catch (err) {
+      console.warn('[Backend] Daily Quest conditional update failed:', err);
+    }
+  }
+
   return res.json({ 
     data: {
       id: updated.id,
@@ -403,10 +417,14 @@ export const moveNode = catchAsync(async (req: Request, res) => {
 export const deleteNode = catchAsync(async (req: Request, res) => {
   const nodeId = Number(req.params.id);
   const userId = req.user!.id;
+  const userEmail = req.user!.email;
 
   if (Number.isNaN(nodeId)) {
     throw new AppError('Invalid node ID', 400);
   }
+
+  // Collect IDs to delete for Daily Quest cascade before removing locally
+  let idsToDelete: number[] = [];
 
   await db.transaction(async (tx) => {
     // Verify ownership
@@ -421,6 +439,12 @@ export const deleteNode = catchAsync(async (req: Request, res) => {
     }
 
     const nodePath = nodeToDelete.path;
+
+    // Gather all node IDs under this path (including root)
+    const idRows = await tx.execute<{ id: number }>(
+      sql`SELECT id FROM nodes WHERE path <@ ${nodePath}::ltree`
+    );
+    idsToDelete = idRows.map(r => Number(r.id));
 
     // Delete the node and all its descendants using path matching
     await tx.execute(
@@ -442,6 +466,15 @@ export const deleteNode = catchAsync(async (req: Request, res) => {
         .where(eq(nodes.id, siblingId));
     }
   });
+
+  // Best-effort: delete corresponding items from Daily Quest
+  try {
+    if (idsToDelete.length > 0) {
+      await deleteNodesFromDailyQuest(idsToDelete, userEmail);
+    }
+  } catch (err) {
+    console.warn('[Backend] Daily Quest cascade delete failed:', err);
+  }
 
   return res.status(200).json({ status: 'ok', message: 'Node deleted successfully' });
 });

@@ -1,4 +1,4 @@
-import { eq, and } from 'drizzle-orm';
+import { eq, and, inArray } from 'drizzle-orm';
 import { dailyQuestDb } from '../db/dailyQuest';
 import { tasks, authUsers } from '../db/dailyQuestSchema';
 import type { Node } from '../db/schema';
@@ -124,10 +124,95 @@ export const syncTaskToDailyQuest = async ({ node, userEmail }: SyncNodeParams) 
   }
 };
 
+// Update an item in Daily Quest ONLY if it already exists for this user's account.
+// Does not create a new entry.
+export const updateTaskInDailyQuestIfExists = async ({ node, userEmail }: SyncNodeParams) => {
+  console.log('[DailyQuest] Conditional update for node:', { nodeId: node.id, name: node.name, userEmail });
+
+  const supabaseUserId = await findSupabaseUserId(userEmail);
+  if (!supabaseUserId) {
+    console.warn('[DailyQuest] Skipping update: Supabase user not found');
+    return { updated: false } as const;
+  }
+
+  // Map node fields
+  const completed = node.status === 'done' || node.status === 'archived';
+  let priority: 'low' | 'medium' | 'high' = 'medium';
+  if (node.status === 'in_progress') priority = 'high';
+
+  const itemData = {
+    userId: supabaseUserId,
+    projectId: null,
+    title: node.name,
+    description: node.metaDescription || null,
+    dueDate: node.deadline || null,
+    priority,
+    completed,
+    projectTags: node.path ? node.path.split('.').filter(Boolean) : [],
+    pinnedScope: null,
+    pinnedAt: null,
+    orderIndex: node.sortOrder,
+    projectTrackerNodeId: node.id,
+    isProject: !node.isTask,
+  };
+
+  try {
+    const existingItems = await dailyQuestDb
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.projectTrackerNodeId, node.id), eq(tasks.userId, supabaseUserId)));
+
+    if (existingItems.length === 0) {
+      console.log('[DailyQuest] No existing item; not creating during update.');
+      return { updated: false } as const;
+    }
+
+    const existingItem = existingItems[0];
+    const [updated] = await dailyQuestDb
+      .update(tasks)
+      .set({
+        ...itemData,
+        createdAt: existingItem.createdAt,
+      })
+      .where(eq(tasks.id, existingItem.id))
+      .returning();
+
+    console.log('[DailyQuest] Conditional update success:', updated.id);
+    return { updated: true } as const;
+  } catch (error) {
+    console.error('[DailyQuest] Conditional update failed:', error);
+    return { updated: false } as const;
+  }
+};
+
 export const deleteTaskFromDailyQuest = async (nodeId: number, userId: string) => {
   // You might want to store a mapping between node IDs and Daily Quest task IDs
   // For now, we'll just delete by title matching
   // This is a limitation - consider adding a mapping table in the future
   console.log(`[DailyQuest] Delete request for node ${nodeId} (user ${userId})`);
   // Implementation would require a mapping table
+};
+
+export const deleteNodesFromDailyQuest = async (nodeIds: number[], userEmail: string) => {
+  console.log('[DailyQuest] Starting cascade delete for node IDs:', nodeIds);
+
+  const supabaseUserId = await findSupabaseUserId(userEmail);
+  if (!supabaseUserId) {
+    console.warn('[DailyQuest] Skipping delete: Supabase user not found for email', userEmail);
+    return { deletedCount: 0 };
+  }
+
+  try {
+    const result = await dailyQuestDb
+      .delete(tasks)
+      .where(and(inArray(tasks.projectTrackerNodeId, nodeIds), eq(tasks.userId, supabaseUserId)))
+      .returning({ id: tasks.id, projectTrackerNodeId: tasks.projectTrackerNodeId });
+
+    console.log('[DailyQuest] Cascade delete removed items:', result.length);
+    return { deletedCount: result.length };
+  } catch (error) {
+    console.error('[DailyQuest] Error during cascade delete:', error);
+    // Do not throw to avoid blocking main deletion
+    return { deletedCount: 0 };
+  }
 };
