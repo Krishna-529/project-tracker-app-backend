@@ -235,6 +235,84 @@ export const updateNode = catchAsync(async (req: Request, res) => {
     }
   }
 
+  // Upward status propagation: after changing current node status/force-complete,
+  // recompute ancestors until no change occurs or root reached.
+  try {
+    const statusChanged = Object.prototype.hasOwnProperty.call(body, 'status') || Object.prototype.hasOwnProperty.call(body, 'forceCompleted');
+    if (statusChanged) {
+      // If forceCompleted was toggled, update current project's status first
+      if (Object.prototype.hasOwnProperty.call(body, 'forceCompleted')) {
+        const isForced = (body as any).forceCompleted === true;
+        if (isForced) {
+          // Mark current module done immediately
+          await db.update(nodes).set({ status: 'done', updatedAt: new Date() }).where(and(eq(nodes.id, id), eq(nodes.userId, userId)));
+          updated.status = 'done';
+        } else {
+          // Recompute current project from its children when un-forcing
+          const children = await db.select({ status: nodes.status }).from(nodes).where(and(eq(nodes.parentId, id), eq(nodes.userId, userId)));
+          let newStatus = updated.status;
+          if (children.length === 0) {
+            newStatus = 'todo';
+          } else {
+            // Include archived children per requirement
+            const anyInProgress = children.some(c => c.status === 'in_progress');
+            const allDone = children.every(c => c.status === 'done');
+            if (anyInProgress) newStatus = 'in_progress';
+            else if (allDone) newStatus = 'done';
+            else newStatus = 'todo';
+          }
+          if (newStatus !== updated.status) {
+            await db.update(nodes).set({ status: newStatus, updatedAt: new Date() }).where(and(eq(nodes.id, id), eq(nodes.userId, userId)));
+            updated.status = newStatus;
+          }
+        }
+      }
+
+      // Walk up ancestors: recompute starting from the direct parent upward
+      const parentId = updated.parentId;
+      if (parentId != null) {
+        let changed = true;
+        let ancestorId: number | null = parentId;
+        while (changed && ancestorId != null) {
+          // Compute derived status for this ancestor
+          const [ancestor] = await db.select().from(nodes).where(and(eq(nodes.id, ancestorId), eq(nodes.userId, userId)));
+          if (!ancestor) break;
+
+          // If forceCompleted on ancestor, it stays done
+          const isForced = (ancestor as any).forceCompleted === true || (ancestor as any).force_completed === true;
+          let newStatus = ancestor.status;
+          if (isForced) {
+            newStatus = 'done';
+          } else {
+            // Derive from immediate children including archived (per requirement not to ignore)
+            const children = await db.select({ status: nodes.status }).from(nodes).where(and(eq(nodes.parentId, ancestorId), eq(nodes.userId, userId)));
+            if (children.length === 0) {
+              newStatus = 'todo';
+            } else {
+              const anyInProgress = children.some(c => c.status === 'in_progress');
+              const allDone = children.every(c => c.status === 'done');
+              if (anyInProgress) newStatus = 'in_progress';
+              else if (allDone) newStatus = 'done';
+              else newStatus = 'todo';
+            }
+          }
+
+          if (newStatus !== ancestor.status) {
+            await db.update(nodes).set({ status: newStatus, updatedAt: new Date() }).where(and(eq(nodes.id, ancestorId), eq(nodes.userId, userId)));
+            // Move up to this ancestor's parent
+            ancestorId = ancestor.parentId ?? null;
+            changed = true;
+          } else {
+            // No change; stop propagation
+            changed = false;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[Backend] Upward status propagation failed:', e);
+  }
+
   return res.json({ 
     data: {
       id: updated.id,
