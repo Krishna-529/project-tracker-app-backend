@@ -111,43 +111,22 @@ export const googleCallback = async (req: Request, res: Response, next: NextFunc
       console.log('[AUTH] User updated in Project Tracker:', { id: user.id, email: user.email });
     }
 
-    // Now sync the user to Daily Quest database
-    console.log('[AUTH] Syncing user to Daily Quest database...');
+    // Now check the user in Daily Quest (Supabase auth schema is read-only)
+    console.log('[AUTH] Checking user presence in Daily Quest auth schema...');
     try {
       const [existingDailyQuestUser] = await dailyQuestDb
         .select()
         .from(dailyQuestUsers)
-        .where(eq(dailyQuestUsers.googleId, googleUser.sub));
+        .where(eq(dailyQuestUsers.id, user.id));
 
       if (existingDailyQuestUser) {
-        console.log('[AUTH] User exists in Daily Quest, updating...');
-        await dailyQuestDb
-          .update(dailyQuestUsers)
-          .set({
-            name: googleUser.name,
-            avatarUrl: googleUser.picture,
-            updatedAt: new Date(),
-          })
-          .where(eq(dailyQuestUsers.id, existingDailyQuestUser.id));
-        console.log('[AUTH] Daily Quest user updated:', { id: existingDailyQuestUser.id });
+        console.log('[AUTH] User exists in Daily Quest auth.users:', { id: existingDailyQuestUser.id });
       } else {
-        console.log('[AUTH] Creating new user in Daily Quest with same UUID from Project Tracker...');
-        await dailyQuestDb
-          .insert(dailyQuestUsers)
-          .values({
-            id: user.id, // Use the SAME UUID from Project Tracker
-            googleId: googleUser.sub,
-            email: googleUser.email,
-            name: googleUser.name,
-            avatarUrl: googleUser.picture,
-          });
-        console.log('[AUTH] Daily Quest user created with ID:', user.id);
+        console.log('[AUTH] User not found in Daily Quest auth.users by UUID. This table is read-only; skipping sync.');
       }
-      console.log('[AUTH] ✅ User successfully synced across both databases');
     } catch (dailyQuestError) {
-      console.error('[AUTH] ⚠️ Failed to sync user to Daily Quest:', dailyQuestError);
-      console.error('[AUTH] This will not prevent login, but "Send to Daily Quest" may fail');
-      // Don't fail the login if Daily Quest sync fails
+      console.error('[AUTH] ⚠️ Failed to query Daily Quest auth.users:', dailyQuestError);
+      // Don't fail the login if Daily Quest lookup fails
     }
 
     console.log('[AUTH] Sending token response...');

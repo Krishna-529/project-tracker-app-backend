@@ -4,7 +4,7 @@ import { pgTable, uuid, text, boolean, timestamp, integer, varchar, jsonb, pgSch
 export const authSchema = pgSchema('auth');
 
 // Supabase auth.users table (read-only reference - we only query this)
-export const authUsers = authSchema.table('users', {
+export const users = authSchema.table('users', {
   id: uuid('id').primaryKey(),
   email: varchar('email', { length: 255 }),
   rawAppMetaData: jsonb('raw_app_meta_data'),

@@ -1,6 +1,6 @@
 import { eq, and, inArray } from 'drizzle-orm';
 import { dailyQuestDb } from '../db/dailyQuest';
-import { tasks, authUsers } from '../db/dailyQuestSchema';
+import { tasks, users as authUsers } from '../db/dailyQuestSchema';
 import type { Node } from '../db/schema';
 
 interface SyncNodeParams {
