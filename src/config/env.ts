@@ -18,4 +18,5 @@ export const env = {
   cookieDomain: process.env.COOKIE_DOMAIN,
   cookieSecure: process.env.COOKIE_SECURE === 'true',
   dailyQuestDatabaseUrl: getRequiredEnv('DAILY_QUEST_DATABASE_URL'),
+  nodeEnv: process.env.NODE_ENV || 'development'
 };

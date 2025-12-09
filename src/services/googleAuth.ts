@@ -16,6 +16,7 @@ export const googleAuthService = {
         'https://www.googleapis.com/auth/userinfo.email',
       ],
       include_granted_scopes: true,
+      redirect_uri: env.googleRedirectUri, 
     });
   },
 

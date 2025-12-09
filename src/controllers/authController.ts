@@ -19,12 +19,14 @@ const createSendToken = (user: typeof users.$inferSelect, statusCode: number, re
   console.log('[AUTH] Creating token for user:', { id: user.id, email: user.email });
   const token = signToken(user.id, user.email);
 
+  const isProd = process.env.NODE_ENV === 'production';
+
   const cookieOptions = {
     expires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     httpOnly: true,
-    secure: env.cookieSecure,
-    domain: env.cookieDomain,
-    sameSite: 'lax' as const,
+    secure: isProd,                    // must be true for cross-site cookies
+    sameSite: 'none' as const,         // REQUIRED for Netlify → Render cookies
+    domain: env.cookieDomain || undefined
   };
 
   console.log('[AUTH] Setting cookie:', {
@@ -35,15 +37,14 @@ const createSendToken = (user: typeof users.$inferSelect, statusCode: number, re
 
   res.cookie(env.jwtCookieName, token, cookieOptions);
 
-  user.googleId = undefined as any; // Remove sensitive data from output
+  user.googleId = undefined as any;
 
   res.status(statusCode).json({
     status: 'success',
-    data: {
-      user,
-    },
+    data: { user },
   });
 };
+
 
 export const getGoogleUrl = (req: Request, res: Response) => {
   console.log('[AUTH] Getting Google OAuth URL');
@@ -140,12 +141,17 @@ export const googleCallback = async (req: Request, res: Response, next: NextFunc
 
 export const logout = (req: Request, res: Response) => {
   console.log('[AUTH] Logout called');
+
+  const isProd = process.env.NODE_ENV === 'production';
+
   res.cookie(env.jwtCookieName, 'loggedout', {
     expires: new Date(Date.now() + 10 * 1000),
     httpOnly: true,
-    secure: env.cookieSecure,
-    domain: env.cookieDomain,
+    secure: isProd,
+    sameSite: 'none' as const,
+    domain: env.cookieDomain || undefined
   });
+
   console.log('[AUTH] Cookie cleared');
   res.status(200).json({ status: 'success' });
 };
