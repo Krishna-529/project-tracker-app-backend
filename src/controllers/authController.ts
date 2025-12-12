@@ -112,23 +112,30 @@ export const googleCallback = async (req: Request, res: Response, next: NextFunc
       console.log('[AUTH] User updated in Project Tracker:', { id: user.id, email: user.email });
     }
 
-    // Now check the user in Daily Quest (Supabase auth schema is read-only)
+   // Now check the user in Daily Quest (Supabase auth schema is read-only)
     console.log('[AUTH] Checking user presence in Daily Quest auth schema...');
-    try {
-      const [existingDailyQuestUser] = await dailyQuestDb
-        .select()
-        .from(dailyQuestUsers)
-        .where(eq(dailyQuestUsers.id, user.id));
 
-      if (existingDailyQuestUser) {
-        console.log('[AUTH] User exists in Daily Quest auth.users:', { id: existingDailyQuestUser.id });
-      } else {
-        console.log('[AUTH] User not found in Daily Quest auth.users by UUID. This table is read-only; skipping sync.');
+    if (process.env.SKIP_DAILY_QUEST === 'true') {
+      console.log('[AUTH] SKIP_DAILY_QUEST=true -> skipping Daily Quest lookup (temporary)');
+    } else {
+      try {
+        // This may fail or timeout if the remote DB is unreachable; catch so login still succeeds
+        const [existingDailyQuestUser] = await dailyQuestDb
+          .select()
+          .from(dailyQuestUsers)
+          .where(eq(dailyQuestUsers.id, user.id));
+
+        if (existingDailyQuestUser) {
+          console.log('[AUTH] User exists in Daily Quest auth.users:', { id: existingDailyQuestUser.id });
+        } else {
+          console.log('[AUTH] User not found in Daily Quest auth.users by UUID. This table is read-only; skipping sync.');
+        }
+      } catch (dailyQuestError) {
+        console.error('[AUTH] ⚠️ Failed to query Daily Quest auth.users (non-fatal):', dailyQuestError && (dailyQuestError.message ?? dailyQuestError));
+        // NOTE: we intentionally do not throw here — we want the OAuth flow to continue even if DailyQuest is down
       }
-    } catch (dailyQuestError) {
-      console.error('[AUTH] ⚠️ Failed to query Daily Quest auth.users:', dailyQuestError);
-      // Don't fail the login if Daily Quest lookup fails
     }
+
 
     console.log('[AUTH] Sending token response...');
     createSendToken(user, 200, res);
